@@ -1,0 +1,147 @@
+---
+title: "CPI Viz"
+author: "German Juarez"
+format: html
+editor: visual
+---
+
+## Clean Data
+
+```{r}
+#| echo: false
+#| warning: false
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(scales)
+
+# load the data, skipping the first two title rows
+raw_bls <- read_excel("cu-income-quintiles-before-taxes-2024 (1).xlsx", skip = 2) 
+
+# rename columns to be more code friendly
+names(raw_bls) <- c("category", "all_units", "q1_lowest", "q2", "q3", "q4", "q5_highest")
+
+
+# this creates a new column with the actual item name, and pulls it down to align with the mean data rows
+clean_bls <- raw_bls |>
+  mutate(
+    # these are the main category headers 
+    main_item = if_else(!category %in% c("Mean", "SE", "Share", "RSE", "Lower limit", NA), 
+                        str_trim(category), 
+                        NA_character_)
+  ) |>
+  fill(main_item, .direction = "down") |>
+  # filter for average dollar amounts
+  filter(category == "Mean") |>
+  select(-category) |> 
+  relocate(main_item)
+
+# extracting specific data
+expenditure_data <- clean_bls |>
+  filter(main_item == "Average annual expenditures") |>
+  pivot_longer(cols = q1_lowest:q5_highest, names_to = "quintile", values_to = "total_expenditures") |>
+  mutate(total_expenditures = as.numeric(total_expenditures)) |>
+  select(quintile, total_expenditures)
+
+# isolate the two distinct necessity categories
+target_necessities <- c("Food", "Housing")
+
+```
+
+```{r}
+#| echo: false
+
+necessities_data <- clean_bls |>
+  filter(main_item %in% target_necessities) |>
+  pivot_longer(cols = q1_lowest:q5_highest, names_to = "quintile", values_to = "amount") |>
+  mutate(amount = as.numeric(amount))
+
+# calculate percentages based on total expend
+plot_data <- necessities_data |>
+  left_join(expenditure_data, by = "quintile") |>
+  mutate(percentage = amount / total_expenditures) |>
+  select(quintile, main_item, percentage)
+
+# calculate remaining equal to 100 percent
+remainder_data <- plot_data |>
+  group_by(quintile) |>
+  summarize(total_necessity_pct = sum(percentage), .groups = "drop") |>
+  mutate(
+    main_item = "Other",
+    percentage = 1 - total_necessity_pct
+  ) |>
+  select(quintile, main_item, percentage)
+
+# combine and order the factors for stacking
+final_df <- bind_rows(plot_data, remainder_data) |>
+  mutate(quintile = factor(quintile, levels = c("q1_lowest", "q2", "q3", "q4", "q5_highest"))) |>
+  mutate(main_item = factor(main_item, levels = c(
+    "Other",
+    "Food",
+    "Housing"
+  )))
+
+# create a label for the top of the bars
+label_df <- plot_data |>
+  group_by(quintile) |>
+  summarize(total_necessity_pct = sum(percentage), .groups = "drop") |>
+  left_join(expenditure_data, by = "quintile") |>
+  mutate(
+    # two-line label
+    combined_label = paste0(
+      dollar(total_expenditures), 
+      "\n(", 
+      percent(total_necessity_pct, accuracy = 0.1), 
+      " Necessities)"
+    )
+  )
+
+```
+
+```{r}
+#| echo: false
+ggplot(final_df, aes(x = quintile, y = percentage, fill = main_item)) +
+  geom_bar(stat = "identity", position = "stack") +
+  
+  geom_text(
+    data = label_df,
+    aes(x = quintile, y = 1.02, label = combined_label, fill = NULL),
+    vjust = 0, 
+    fontface = "bold", 
+    size = 2,
+    lineheight = 0.9, # brings the two lines of text slightly closer together
+    color = "#2c3e50"
+  ) +
+  
+  # color Palette
+  scale_fill_manual(
+    values = c(
+      "Other" = "#e6e6e6",               
+      "Food" = "#e63946",                                
+      "Housing" = "#1d3557"                              
+    )
+  ) +
+  
+  # the 25% upper expansion 
+  scale_y_continuous(
+    labels = percent_format(), 
+    expand = expansion(mult = c(0, 0.25)) 
+  ) +
+  
+  scale_x_discrete(labels = c("Lowest 20%", "Second 20%", "Third 20%", "Fourth 20%", "Highest 20%")) +
+  
+  labs(
+    title = "The Cost of Survival: How Expenditures Shift by Income",
+    subtitle = "Lower-income households dedicate a vastly larger share of their total spending to necessities.",
+    x = "Income Bracket",
+    y = "Percentage of Total Expenditures",
+    fill = "Expenditure Category"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right", 
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.major.x = element_blank()
+  )
+
+```
